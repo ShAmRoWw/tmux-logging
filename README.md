@@ -1,5 +1,22 @@
 # Tmux Logging
 
+Changes from upstream                                                                                                                                     
+                                                                                                                                                            
+Replaced the sed-based ANSI escape code stripper with a VT100 screen emulator filter (scripts/logging_filter.py). The original approach only removed color
+codes, leaving cursor movements, backspace sequences, and other control characters in the log — producing unreadable output.
+
+The new filter maintains an in-memory screen buffer (matching the pane dimensions) and logs lines only when they scroll off the top of the screen. This
+correctly handles:
+
+- Backspace / autosuggestions — only the final visible text is logged
+- Tab-completion menus — drawn and erased in-place, never reach the log
+- Full-screen apps (nano, vim, less) — use the alternate screen buffer, content is discarded
+- Progress bars (\r) — overwrite in-place, only the last state is logged
+
+Requires Python 3. Falls back to ansifilter or sed if unavailable.
+
+---
+
 Features:
 
 1. Logging of all output in the current pane<br/>
