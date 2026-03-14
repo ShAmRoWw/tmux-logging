@@ -27,6 +27,7 @@ Usage:  cat raw_pty_bytes | python3 logging_filter.py [COLS ROWS] >> log
 """
 
 import re
+import signal
 import sys
 
 # ── Regex table for escape-sequence lexing ────────────────────────────────
@@ -319,6 +320,14 @@ def main():
     stdin  = open(sys.stdin.fileno(), 'r', newline='',
                   encoding='utf-8', errors='replace', closefd=False)
     screen = Screen(cols, rows, sys.stdout)
+
+    # Ensure buffer is flushed to the log on SIGTERM/SIGHUP (system shutdown,
+    # tmux dying, etc.) — without this, up to a full screen of output is lost.
+    def _sig_flush(signum, frame):
+        screen.flush_all()
+        sys.exit(0)
+    signal.signal(signal.SIGTERM, _sig_flush)
+    signal.signal(signal.SIGHUP, _sig_flush)
 
     pending = ''
     try:
