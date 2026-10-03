@@ -33,23 +33,31 @@ logging_filename=${logging_filename:-$default_logging_filename}
 logging_full_filename="${logging_path}/${logging_filename}"
 
 # Screen capture options
+# Assign directly so command substitution cannot remove filename newlines.
+read_tmux_capture_option() {
+	local option_value
+	option_value=$(tmux show-option -gqv "$1" && printf '.') || return 1
+	option_value=${option_value%.}
+	printf -v "$2" '%s' "${option_value%$'\n'}"
+}
+
 default_screen_capture_path="$HOME"
-screen_capture_path=$(tmux show-option -gqv "@screen-capture-path")
+read_tmux_capture_option "@screen-capture-path" screen_capture_path || return 1
 screen_capture_path=${screen_capture_path:-$default_screen_capture_path}
 
 default_screen_capture_filename="tmux-screen-capture-${filename_suffix}"
-screen_capture_filename=$(tmux show-option -gqv "@screen-capture-filename")
+read_tmux_capture_option "@screen-capture-filename" screen_capture_filename || return 1
 screen_capture_filename=${screen_capture_filename:-$default_screen_capture_filename}
 
 screen_capture_full_filename="${screen_capture_path}/${screen_capture_filename}"
 
 # Save complete history options
 default_save_complete_history_path="$HOME"
-save_complete_history_path=$(tmux show-option -gqv "@save-complete-history-path")
+read_tmux_capture_option "@save-complete-history-path" save_complete_history_path || return 1
 save_complete_history_path=${save_complete_history_path:-$default_save_complete_history_path}
 
 default_save_complete_history_filename="tmux-history-${filename_suffix}"
-save_complete_history_filename=$(tmux show-option -gqv "@save-complete-history-filename")
+read_tmux_capture_option "@save-complete-history-filename" save_complete_history_filename || return 1
 save_complete_history_filename=${save_complete_history_filename:-$default_save_complete_history_filename}
 
 save_complete_history_full_filename="${save_complete_history_path}/${save_complete_history_filename}"
