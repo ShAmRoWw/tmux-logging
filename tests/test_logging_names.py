@@ -41,7 +41,7 @@ class LoggingNameTests(unittest.TestCase):
         self.tmux('set-option', '-g', '@logging-path', str(self.root))
         self.tmux('set-option', '-g', '@logging-filename', self.default.name)
         self.tmux('set-option', '-g', 'status-keys', 'emacs')
-        result = subprocess.run([paths.BASH, str(PLUGIN)], env=self.env,
+        result = subprocess.run([str(PLUGIN)], env=self.env,
                                 capture_output=True, timeout=integration.TIMEOUT)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.attach_client()
