@@ -8,7 +8,7 @@ source "$CURRENT_DIR/logging_state.sh"
 source "$CURRENT_DIR/logging_prompt.sh"
 
 main() {
-	local file stopped owner client= interactive=0
+	local file stopped owner title directory format started= ended= client= interactive=0
 	if [ "${1:-}" = --prompt ]; then
 		interactive=1
 		shift
@@ -18,14 +18,28 @@ main() {
 	logging_read_state || return 1
 	if logging_is_owned; then
 		owner=$LOGGING_OWNER
-		if [ "$interactive" = 1 ]; then logging_recording_file "$owner" file || return 1; fi
-		stopped=$(logging_stop "$owner") || return 1
+		logging_recording_file "$owner" file || return 1
+		started=$(logging_tmux show-option -gqv "@tmux-logging-start-$owner") || return 1
+		# Capture the end before draining or asking a question. A clock failure
+		# must never prevent the user from stopping an active recording.
+		if [ -n "$started" ]; then ended=$(logging_timestamp) || ended=; fi
+		if [ -n "$started" ]; then
+			stopped=$(logging_stop "$owner" "$ended") || return 1
+		else
+			stopped=$(logging_stop "$owner") || return 1
+		fi
 		if [ "$stopped" != stopped ]; then
 			printf 'tmux-logging: recording changed while stopping\n' >&2
 			return 1
 		fi
-		if [ "$interactive" = 1 ]; then
-			logging_finish_name "$owner" "$file" "$client"
+		if [ -n "$started" ]; then
+			# Only the successful stopper owns this result. A concurrent stop
+			# which returns "changed" must not remove its predecessor's state.
+			trap "logging_cleanup_result '$owner'" EXIT
+			trap 'exit 1' HUP INT TERM
+		fi
+		if [ "$interactive" = 1 ] || [ -n "$started" ]; then
+			logging_finish_name "$owner" "$file" "$client" "$started" "$ended"
 		else
 			display_message 'Ended logging'
 		fi
@@ -34,14 +48,38 @@ main() {
 		display_message 'Cannot start logging: pane output pipe is already in use'
 		return 1
 	else
-		if ! expand_tmux_format_path "$logging_full_filename" file "$LOGGING_PANE"; then
+		format=$logging_full_filename
+		if [ "$interactive" = 1 ]; then format=$logging_title_full_filename; fi
+		if ! expand_tmux_format_path "$format" file "$LOGGING_PANE"; then
 			display_message 'Could not start logging'
 			return 1
 		fi
 		if [ "$interactive" = 1 ]; then
-			logging_choose_name "$client" 'Log filename (Enter = default)' "$file" file || return 0
+			title=${file##*/}
+			title=${title%.log}
+			logging_choose_title "$client" 'Log filename (Enter = default)' "$title" title || return 0
+			started=$(logging_timestamp) || { display_message 'Could not determine logging start time'; return 1; }
+			directory=${file%/*}
+			if [ "$directory" = "$file" ]; then directory=.; fi
+			file="$directory/${title}__${started}.log"
+			# Never merge two recordings that happen to get the same title and
+			# second. noclobber also prevents a race with another starting pane.
+			# Check nonregular entries too: Bash noclobber can open a FIFO and
+			# wait indefinitely for a reader instead of reporting a collision.
+			if [ -e "$file" ] || [ -L "$file" ]; then
+				display_message 'Cannot start logging: filename already exists'
+				return 1
+			fi
+			if ! (set -o noclobber; : > "$file") 2>/dev/null; then
+				if [ -e "$file" ] || [ -L "$file" ]; then
+					display_message 'Cannot start logging: filename already exists'
+				else
+					display_message 'Could not create log file'
+				fi
+				return 1
+			fi
 		fi
-		if ! "$CURRENT_DIR/start_logging.sh" "$file" "$LOGGING_PANE"; then
+		if ! TMUX_LOGGING_START_TIME="$started" "$CURRENT_DIR/start_logging.sh" "$file" "$LOGGING_PANE"; then
 			display_message 'Could not start logging'
 			return 1
 		fi

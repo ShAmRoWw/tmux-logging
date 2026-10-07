@@ -57,17 +57,46 @@ Tested and working on Linux, OSX and Cygwin.
 
 Toggle (start/stop) logging in the current pane.
 
-At startup, edit the suggested filename or press Enter to use the default.
-At shutdown, recording stops and the remaining output is written before the
-filename prompt appears. Press Enter to keep the name, or enter a new one.
-Escape cancels startup; at shutdown it keeps the saved file's current name.
+At startup, edit the suggested recording title or press Enter to use the
+session/window/pane name. A blank answer also accepts the suggestion. The plugin
+adds the start time automatically after the answer, for example:
 
-Enter a filename, without a directory; files stay in the configured logging
-directory. Names are used literally, with no automatic extension. A blank answer
-also accepts the suggested name. Renaming never replaces an existing file.
-Starting with an existing filename appends to that file. Safe renaming requires
-hard-link support in the logging filesystem; a failure keeps the original name.
-Direct calls to `scripts/toggle_logging.sh` remain noninteractive.
+```text
+tmux-my_session-0-1__2026-10-07_14-30-00.log
+```
+
+At shutdown, recording stops and the remaining output is written before the
+file is renamed to include its end time:
+
+```text
+tmux-my_session-0-1__2026-10-07_14-30-00__2026-10-07_15-45-12.log
+```
+
+Both timestamps use `Europe/Moscow`, regardless of the host or tmux server's
+timezone, without a timezone suffix in the filename. Each includes its date so
+recordings across midnight are unambiguous. The end time is captured when
+stopping, before waiting for the file to close or for an answer to the prompt.
+The shutdown prompt edits only the title and preserves both timestamps. Enter
+keeps the title; Escape cancels startup or keeps the completed filename after
+shutdown. Exiting the pane's shell, closing the pane, or ending the last tmux
+session also finishes the filename automatically after saving the remaining
+text, without a prompt. This works even after the tmux server has exited.
+Detaching from tmux leaves recording running while the pane remains alive.
+A forcibly killed logger or a power failure may leave only the start time and
+lose text still held in memory.
+
+Titles are literal text without a directory. An optional trailing `.log` is
+removed before adding timestamps and the final `.log` extension. Files stay in
+the configured logging directory. `@logging-filename`, when set, supplies the
+suggested title through its existing tmux format expansion. Neither starting
+nor renaming replaces an existing file; an occupied timestamped name reports an
+error. Safe renaming requires hard-link support in the logging filesystem; a
+failure keeps the preceding name and reports the problem.
+
+Direct calls to `scripts/toggle_logging.sh` remain noninteractive and keep their
+previous start-name format. Stopping a recording created by the key binding still
+adds the end time. Explicit `scripts/start_logging.sh FILE` paths remain literal
+and append to existing files, without automatic timestamps or renaming.
 
 Recording follows the pane's permanent ID, so renaming a session or changing
 pane/window indexes does not break the toggle. Startup is confirmed before a
@@ -76,9 +105,10 @@ is preserved. See [recording lifecycle](docs/synchronization.md#recording-lifecy
 for status and failure handling.
 
 * Key binding: `prefix + shift + p`
-* File name format: `tmux-#{session_name}-#{window_index}-#{pane_index}-%Y%m%dT%H%M%S.log`
+* Default title: `tmux-#{session_name}-#{window_index}-#{pane_index}`
+* Completed file name: `<title>__YYYY-MM-DD_HH-MM-SS__YYYY-MM-DD_HH-MM-SS.log`
 * File path: `$HOME` (user home dir)
-  * Example file: `~/tmux-my-session-0-1-20140527T165614.log`
+  * Example file: `~/tmux-my_session-0-1__2026-10-07_14-30-00__2026-10-07_15-45-12.log`
 
 ### 2. "Screen Capture"
 
@@ -122,8 +152,9 @@ This is just a convenience key binding.
 ### Installation with [Tmux Plugin Manager](https://github.com/tmux-plugins/tpm) (recommended)
 
 If upstream `tmux-plugins/tmux-logging` is already installed, follow the
-[migration instructions](docs/migration.md) first. Both repositories use the
-same TPM directory; changing the plugin declaration alone does not replace it.
+[migration instructions below](#switching-from-upstream) first. Both repositories
+use the same TPM directory; changing the plugin declaration alone does not
+replace it.
 
 For a new installation, add this fork to your tmux configuration before the
 existing TPM initialization line:
@@ -142,6 +173,26 @@ Use your actual configuration path if it is under `$XDG_CONFIG_HOME/tmux` or
 `~/.config/tmux`. Hit `prefix + I` (capital I) to fetch the plugin and source it.
 
 You should now have all `tmux-logging` key bindings defined.
+
+### Switching from upstream
+
+1. Stop active recordings and locate the installed `tmux-logging` directory.
+   It is normally `~/.tmux/plugins/tmux-logging`; use the actual installation
+   path when TPM is configured elsewhere, including a custom
+   `TMUX_PLUGIN_MANAGER_PATH` or an XDG configuration. Check its repository with
+   `git -C /path/to/tmux-logging remote get-url origin`.
+2. Move that directory to a backup location outside TPM's plugin directory.
+   Keep the whole checkout, including local changes, until the fork is verified.
+3. Replace the upstream entry with `set -g @plugin 'ShAmRoWw/tmux-logging'`.
+   If using the older `@tpm_plugins` list, replace the entry there instead.
+   Keep only one logging plugin enabled and retain your custom logging options.
+4. Reload your actual tmux configuration and press `prefix + I` to install the
+   fork. Check `remote get-url origin` in the new checkout: it should identify
+   `ShAmRoWw/tmux-logging` on GitHub.
+
+To return to the previous installation, stop recordings, move the fork aside,
+restore the backup to its original path, and restore the old plugin entry before
+reloading your configuration.
 
 ### Manual Installation
 
@@ -196,9 +247,17 @@ log as above when this plugin is used:
 
 ![proper log output](/screenshots/proper_log_output.png)
 
-### Configuration Docs
+### Configuration
 
-- [Changing default options](docs/configuration.md).
+The default logging directory is `$HOME`. To change it, add this to your tmux
+configuration, replacing the example with your desired directory:
+
+```tmux
+set -g @logging-path '/path/to/logs'
+```
+
+`@logging-filename` changes the suggested recording title; see
+[Logging](#1-logging) for filename prompts and automatic timestamps.
 
 ### Other plugins
 

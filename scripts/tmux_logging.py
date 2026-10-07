@@ -11,6 +11,7 @@ from collections import deque
 import copy
 from difflib import SequenceMatcher
 import io
+from itertools import chain, islice
 import os
 from pathlib import Path
 import re
@@ -130,20 +131,45 @@ def command_args(commands):
 def logical_rows(rows):
     """Group physical rows without losing per-cell emission provenance."""
     groups = []
-    text = ''
-    cells = []
+    text = []
+    physical = []
     empty = []
     for row in rows:
-        text += row.text
-        cells.extend((row, i) for i in range(row.width))
-        if not row.text:
+        content = row.text
+        text.append(content)
+        physical.append(row)
+        if not content:
             empty.append(row)
         if not row.wrapped:
-            groups.append((text, cells, empty))
-            text, cells, empty = '', [], []
-    if text or cells or empty:
-        groups.append((text, cells, empty))
+            groups.append((''.join(text), physical, empty))
+            text, physical, empty = [], [], []
+    if physical:
+        groups.append((''.join(text), physical, empty))
     return groups
+
+
+def copy_seen_rows(previous, current):
+    """Transfer cell markers between differently wrapped physical rows.
+
+    Slices retain the flattened-cell ordering without allocating a tuple for
+    every cell in the captured history. Blank-line markers are handled by the
+    caller because a blank physical row need not occupy any cells.
+    """
+    previous = iter(previous)
+    old_row = next(previous, None)
+    old_i = 0
+    for new_row in current:
+        new_i = 0
+        while new_i < new_row.width:
+            while old_row is not None and old_i == old_row.width:
+                old_row = next(previous, None)
+                old_i = 0
+            if old_row is None:
+                return
+            count = min(old_row.width - old_i, new_row.width - new_i)
+            new_row.seen[new_i:new_i + count] = old_row.seen[old_i:old_i + count]
+            old_i += count
+            new_i += count
 
 
 def reconcile_snapshot(screen, state):
@@ -154,10 +180,10 @@ def reconcile_snapshot(screen, state):
     width; comparing individual physical rows would duplicate old history.
     """
     old = screen._alt_state if screen._in_alt else screen._state()
-    before = logical_rows(old['_history'] + old['_lines'])
+    before = logical_rows(chain(old['_history'], old['_lines']))
     screen.load_snapshot(**state)
     primary = screen._alt_state if screen._in_alt else screen._state()
-    after = logical_rows(primary['_history'] + primary['_lines'])
+    after = logical_rows(chain(primary['_history'], primary['_lines']))
     # load_snapshot treats history as pre-existing only for initial bootstrap.
     # During a rebase, unmatched history is new output and must be emitted.
     for row in primary['_history']:
@@ -185,8 +211,7 @@ def reconcile_snapshot(screen, state):
         for index in range(size):
             previous = before[old_start + index]
             current = after[new_start + index]
-            for (old_row, old_i), (new_row, new_i) in zip(previous[1], current[1]):
-                new_row.seen[new_i] = old_row.seen[old_i]
+            copy_seen_rows(previous[1], current[1])
             for old_row, new_row in zip(previous[2], current[2]):
                 new_row.blank_seen = old_row.blank_seen
     for row in primary['_history']:
@@ -250,11 +275,59 @@ def filename_key(owner):
     return '@tmux-logging-file-' + owner
 
 
+def start_time_key(owner):
+    return '@tmux-logging-start-' + owner
+
+
+def stop_time_key(owner):
+    return '@tmux-logging-stop-' + owner
+
+
+def recording_start_time(filename):
+    """Only explicitly requested timestamped names carry interval metadata."""
+    stamp = os.environ.get('TMUX_LOGGING_START_TIME', '')
+    if (re.fullmatch(r'[0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{2}-[0-9]{2}-[0-9]{2}', stamp)
+            and filename.endswith('__' + stamp + '.log')):
+        return stamp
+    return None
+
+
+def recording_end_time():
+    """Sample the recording boundary before closing the control client."""
+    try:
+        result = subprocess.run(
+            ['bash', str(Path(__file__).with_name('finalize_logging.sh')), '--timestamp'],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=3, check=True)
+        stamp = result.stdout.decode('ascii')
+        if re.fullmatch(r'[0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{2}-[0-9]{2}-[0-9]{2}', stamp):
+            return stamp
+    except (OSError, UnicodeDecodeError, subprocess.SubprocessError):
+        pass
+    # Finalization can retry the clock without compromising the saved data.
+    return ''
+
+
+def finalize_recording_file(filename, start_time, tmux_socket, owner, pane, end_time):
+    """Rename only after the writer is closed, keeping data on helper failure."""
+    try:
+        subprocess.run(
+            ['bash', str(Path(__file__).with_name('finalize_logging.sh')), filename,
+             start_time, tmux_socket, owner, pane, end_time],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
 def clear_recording_file(tmux_socket, owner):
     if owner is None:
         return
     try:
-        subprocess.run(['tmux', '-S', tmux_socket, 'set-option', '-gu', filename_key(owner)],
+        # Removing the filename is the UI's completion barrier. Clear the
+        # interval metadata first so it cannot outlive that barrier.
+        subprocess.run(['tmux', '-S', tmux_socket,
+                        'set-option', '-guq', stop_time_key(owner), ';',
+                        'set-option', '-guq', start_time_key(owner), ';',
+                        'set-option', '-guq', filename_key(owner)],
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=3)
     except (OSError, subprocess.SubprocessError):
         # A removed pane/server no longer has metadata to publish.
@@ -442,6 +515,7 @@ class Recording:
                     self.stream = StreamProcessor(self.screen)
                     self.stream.feed(self.decoder.decode(pending))
                     self.window = metadata['window_id']
+                    self.responses.clear()
                     self.ready = True
             elif self.rebase_responses is not None:
                 self.rebase_responses.append(value)
@@ -500,7 +574,7 @@ class Recording:
         candidate_stream = copy.deepcopy(self.stream, {id(self.screen): candidate})
         candidate_decoder = codecs.getincrementaldecoder('utf-8')(errors='replace')
         candidate_decoder.setstate(self.decoder.getstate())
-        for kind, data in list(self.events)[:snapshot_index]:
+        for kind, data in islice(self.events, snapshot_index):
             if kind == 'resize':
                 candidate.resize(*data)
             elif kind == 'output':
@@ -638,6 +712,15 @@ class Recording:
 
 def worker(tmux_socket, pane, session, filename, status_fd):
     filename = os.path.abspath(filename)
+    start_time = recording_start_time(filename)
+    announced_ready = False
+    end_time = None
+
+    def mark_end():
+        nonlocal end_time
+        if announced_ready and start_time is not None and end_time is None:
+            end_time = recording_end_time()
+
     def report(message):
         nonlocal status_fd
         if status_fd is not None:
@@ -674,6 +757,7 @@ def worker(tmux_socket, pane, session, filename, status_fd):
             disconnected_at = None
             while True:
                 if stop_requested:
+                    mark_end()
                     if not recording.ready:
                         raise RuntimeError('logging startup interrupted')
                     recording.request_stop()
@@ -692,6 +776,7 @@ def worker(tmux_socket, pane, session, filename, status_fd):
                 if recording.control.stdout in ready:
                     data = os.read(recording.control.stdout.fileno(), 65536)
                     if not data:
+                        mark_end()
                         if not recording.ready:
                             error = recording.control.stderr.read().decode(errors='replace')
                             raise RuntimeError(error or 'tmux control client closed during startup')
@@ -702,6 +787,7 @@ def worker(tmux_socket, pane, session, filename, status_fd):
                 if peer is not None and peer in ready:
                     data = peer.recv(65536)
                     if not data and recording.final_count is None:
+                        mark_end()
                         raise RuntimeError('tmux pipe reader closed without its final byte count')
                     count_buffer.extend(data)
                     while b'\n' in count_buffer:
@@ -716,6 +802,7 @@ def worker(tmux_socket, pane, session, filename, status_fd):
                                 raise RuntimeError('logging pipe reader ownership does not match')
                             recording.relay_owner = recording.owner = owner
                         elif line.startswith(b'END '):
+                            mark_end()
                             recording.final_count = int(line[4:])
                             recording.available = recording.final_count
                         else:
@@ -728,10 +815,16 @@ def worker(tmux_socket, pane, session, filename, status_fd):
                     if (recording.owner is not None and recording.relay_owner == recording.owner
                             and recording.final_count is None and not recording.stopping):
                         if status_fd is not None:
+                            metadata = []
+                            if start_time is not None:
+                                metadata.append(tmux_join(['set-option', '-gq',
+                                                           start_time_key(recording.owner),
+                                                           start_time]))
+                            metadata.append(tmux_join(['set-option', '-gq',
+                                                       filename_key(recording.owner), filename]))
                             subprocess.run(
                                 ['tmux', '-S', tmux_socket, 'if-shell', '-F', '1',
-                                 tmux_join(['set-option', '-gq',
-                                            filename_key(recording.owner), filename])],
+                                 ' ; '.join(metadata)],
                                 stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
                                 timeout=3, check=True)
                             owned = subprocess.run(
@@ -742,6 +835,7 @@ def worker(tmux_socket, pane, session, filename, status_fd):
                             if owned != b'1':
                                 raise RuntimeError('logging pipe was replaced during startup')
                             report('READY')
+                            announced_ready = True
                 if status_fd is not None and time.monotonic() >= deadline:
                     raise RuntimeError('timed out while synchronizing with tmux')
                 if control_closed and recording.final_count is not None:
@@ -758,7 +852,8 @@ def worker(tmux_socket, pane, session, filename, status_fd):
                     break
             recording.finish()
     except Exception as error:
-        was_ready = status_fd is None
+        mark_end()
+        was_ready = announced_ready
         report('ERROR ' + str(error))
         if recording is not None:
             try:
@@ -771,17 +866,25 @@ def worker(tmux_socket, pane, session, filename, status_fd):
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=3)
         raise
     finally:
+        mark_end()
         try:
             if recording is not None:
                 recording.close()
         finally:
+            output_closed = False
             try:
                 if output is not None:
                     output.close()
+                    output_closed = True
             finally:
                 try:
-                    if recording is not None:
-                        clear_recording_file(tmux_socket, recording.owner)
+                    try:
+                        if announced_ready and start_time is not None and output_closed:
+                            finalize_recording_file(filename, start_time, tmux_socket,
+                                                    recording.owner, pane, end_time or '')
+                    finally:
+                        if recording is not None:
+                            clear_recording_file(tmux_socket, recording.owner)
                 finally:
                     # Keep the worker socket open until the file is closed:
                     # relay EOF cleanup must not advertise completion sooner.

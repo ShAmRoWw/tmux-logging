@@ -51,9 +51,19 @@ otherwise retain until the next output byte. The ansifilter/sed wrapper watches
 its filter and removes its own registration and pipe when the filter exits.
 External `pipe-pane` stops also end the corresponding recording.
 
+For timestamped recordings created by the key binding, the writer adds the
+Moscow end time after closing the file. Shell `exit`, pane closure, and the last
+session's exit finalize the filename without a dialog or a live tmux server.
+An explicit toggle records its requested stop time before closing the pipe;
+the writer returns the finished path before the optional title-editing prompt.
+Existing destination names are preserved and a failed rename leaves the log
+under its previous name. Explicit unmarked script filenames remain unchanged.
+Client detachment alone does not stop recording while its pane remains alive.
+
 Normal Python shutdown flushes pending main-screen text. A forcibly killed
 worker cannot flush text held only in its memory; clearing its status does not
-recover that text. Lifecycle checks were exercised on Linux with tmux 3.7c.
+recover that text or guarantee a completed filename. Lifecycle checks were
+exercised on Linux with tmux 3.7c.
 
 ## Screen synchronization
 

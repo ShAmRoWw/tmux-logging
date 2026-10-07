@@ -72,9 +72,13 @@ logging_cleanup() {
 }
 
 logging_stop() {
-	local clear
+	local clear request=
 	clear="set-option -guq '$LOGGING_OPTION'"
+	if [ "$#" -gt 1 ]; then
+		request="set-option -gq '@tmux-logging-stop-$1' $(quote_tmux_argument "requested:$2") ; "
+		request+="set-option -gq '@tmux-logging-result-$1' pending ; "
+	fi
 	logging_tmux if-shell -F -t "$LOGGING_PANE" "$(logging_pipe_condition "$1")" \
-		"pipe-pane -t '$LOGGING_PANE' ; if-shell -F -t '$LOGGING_PANE' '$(logging_owner_condition "$1")' $(quote_tmux_argument "$clear") ; display-message -p stopped" \
+		"${request}pipe-pane -t '$LOGGING_PANE' ; if-shell -F -t '$LOGGING_PANE' '$(logging_owner_condition "$1")' $(quote_tmux_argument "$clear") ; display-message -p stopped" \
 		'display-message -p changed'
 }

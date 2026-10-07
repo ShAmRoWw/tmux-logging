@@ -28,9 +28,13 @@ logging_path=${logging_path:-$default_logging_path}
 
 default_logging_filename="tmux-${filename_suffix}"
 logging_filename=$(tmux show-option -gqv "@logging-filename")
+# Interactive recordings add their own Moscow start/end timestamps. Keep the
+# historical full filename contract for direct, noninteractive script calls.
+logging_title=${logging_filename:-"tmux-#{session_name}-#{window_index}-#{pane_index}.log"}
 logging_filename=${logging_filename:-$default_logging_filename}
 
 logging_full_filename="${logging_path}/${logging_filename}"
+logging_title_full_filename="${logging_path}/${logging_title}"
 
 # Screen capture options
 # Assign directly so command substitution cannot remove filename newlines.

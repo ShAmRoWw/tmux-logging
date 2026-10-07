@@ -1,12 +1,21 @@
 # Interactive naming is used by the key binding. Direct script invocations
 # retain their noninteractive behavior for automation.
 
+source "$(dirname "${BASH_SOURCE[0]}")/logging_files.sh"
+
 logging_recording_file() {
 	local value
 	value=$(logging_tmux show-option -gqv "@tmux-logging-file-$1" && printf '.') || return 1
 	value=${value%.}
 	value=${value%$'\n'}
 	printf -v "$2" '%s' "$value"
+}
+
+logging_cleanup_result() {
+	# A slow writer may still need the requested stop time after the UI exits.
+	# Only the backend clears it; removing pending result ownership prevents
+	# that writer from recreating an abandoned result option later.
+	logging_tmux set-option -guq "@tmux-logging-result-$1" >/dev/null 2>&1
 }
 
 logging_name_prompt() (
@@ -59,8 +68,27 @@ logging_choose_name() {
 	printf -v "$4" '%s' "$directory/$answer"
 }
 
+logging_choose_title() {
+	local response
+	response=$(logging_name_prompt "$1" "$2" "$3" && printf '.') || return 1
+	response=${response%.}
+	# An empty answer accepts the existing title without stripping it again.
+	if [ -z "$response" ] || [ "$response" = "$3" ]; then
+		response=$3
+	else
+		response=${response%.log}
+	fi
+	case "$response" in
+		''|*/*|.|..)
+			display_message 'Invalid log filename: enter a name without a directory'
+			return 1 ;;
+	esac
+	printf -v "$4" '%s' "$response"
+}
+
 logging_finish_name() {
-	local owner=$1 file=$2 client=$3 remaining renamed attempt status
+	local owner=$1 file=$2 client=$3 started=${4:-} ended=${5:-}
+	local remaining renamed attempt title directory base result status
 	if [ -z "$file" ]; then
 		display_message 'Ended logging: original filename is unavailable'
 		return 0
@@ -74,41 +102,62 @@ logging_finish_name() {
 		display_message 'Ended logging: file is still closing; name kept'
 		return 1
 	fi
-	logging_choose_name "$client" 'Save log as (Enter = keep current)' "$file" renamed || return 0
+	if [ -n "$started" ]; then
+		# The owner-specific marker distinguishes our generated names from an
+		# explicit caller filename which happens to look like a timestamp.
+		result=$(logging_tmux show-option -gqv "@tmux-logging-result-$owner" && printf '.') || return 1
+		result=${result%.}
+		result=${result%$'\n'}
+		status=${result%%:*}
+		if [ "$status" != 0 ]; then
+			case "$status" in
+				2) display_message 'Cannot rename log: filename already exists' ;;
+				3) display_message 'Log saved under both names: could not remove original name' ;;
+				*) display_message 'Ended logging: could not complete filename; original name kept' ;;
+			esac
+			return 1
+		fi
+		if [[ $file != *"__${started}.log" ]]; then
+			display_message 'Ended logging: could not complete filename; original name kept'
+			return 1
+		fi
+		base=${file%__"$started".log}
+		file=${result#*:}
+		ended=${file%.log}
+		ended=${ended##*__}
+		if [ -z "$client" ]; then
+			display_message 'Ended logging'
+			return 0
+		fi
+		# Finalize before the prompt: Escape or detach still keeps both times.
+		title=${base##*/}
+		directory=${file%/*}
+		logging_choose_title "$client" 'Save log as (Enter = keep current)' "$title" title || return 0
+		renamed="$directory/${title}__${started}__${ended}.log"
+	else
+		logging_choose_name "$client" 'Save log as (Enter = keep current)' "$file" renamed || return 0
+	fi
 	if [ "$renamed" = "$file" ]; then
 		display_message 'Ended logging'
 		return 0
 	fi
-	if [ -e "$renamed" ] || [ -L "$renamed" ]; then
+	logging_change_name "$file" "$renamed" || return 1
+	display_message 'Ended logging; file renamed'
+}
+
+logging_change_name() {
+	local status
+	if [ -e "$2" ] || [ -L "$2" ]; then
 		display_message 'Cannot rename log: filename already exists'
 		return 1
 	fi
-	logging_rename_file "$file" "$renamed"
+	logging_rename_file "$1" "$2"
 	status=$?
 	case "$status" in
-		0) display_message 'Ended logging; file renamed' ;;
+		0) ;;
 		2) display_message 'Cannot rename log: filename already exists' ;;
 		3) display_message 'Log saved under both names: could not remove original name' ;;
 		*) display_message 'Cannot rename log: original name kept' ;;
 	esac
 	return "$status"
 }
-
-logging_rename_file() (
-	local original=$1 destination=$2 directory stage basename
-	directory=${destination%/*}
-	basename=${destination##*/}
-	stage=$(mktemp -d "$directory/.tmux-logging-rename.XXXXXXXX") || return 1
-	trap 'rm -rf -- "$stage"' EXIT
-	trap 'exit 1' HUP INT TERM
-	# A hard link publishes the new name without replacing an existing entry.
-	# Pass a fixed parent directory to the final ln: even a destination that
-	# becomes a directory during the operation then fails with EEXIST, rather
-	# than moving the log inside that directory. -P preserves symbolic links.
-	ln -P -- "$original" "$stage/$basename" || return 1
-	if ! ln -P -- "$stage/$basename" "$directory/"; then
-		if [ -e "$destination" ] || [ -L "$destination" ]; then return 2; fi
-		return 1
-	fi
-	rm -- "$original" || return 3
-)

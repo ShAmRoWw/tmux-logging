@@ -48,7 +48,7 @@ pipe_pane_filtered() (
 	trap '[ "$success" = 1 ] || { [ -z "$owner" ] || logging_cleanup "$owner"; }; rm -rf -- "$directory"' EXIT
 	trap 'exit 1' HUP INT TERM
 	for argument in bash "$CURRENT_DIR/logging_pipe.sh" "$LOGGING_SOCKET" \
-		"$LOGGING_PANE" "$token" "$directory" "$FILE" "$@"; do
+		"$LOGGING_PANE" "$token" "$directory" "$FILE" "${TMUX_LOGGING_START_TIME:-}" "$@"; do
 		command="$command $(quote_pipe_pane_argument "$argument")"
 	done
 	command="$command 2> $(quote_pipe_pane_argument "$directory/error")"

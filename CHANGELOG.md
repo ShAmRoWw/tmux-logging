@@ -2,6 +2,17 @@
 
 ### master
 
+- Reduce per-character work to the affected cells, copy screen buffers without
+  visiting immutable characters, and transfer resize markers by row spans.
+  Release startup captures after loading and skip rebuilding recorded rows.
+- Finalize timestamped log filenames automatically on shell exit, pane closure,
+  and normal writer shutdown, including after the last tmux server exits. Flush
+  and close the file before renaming, preserve manual stop times and existing
+  destinations, and keep explicit script paths literal.
+- Add readable start and end timestamps in Europe/Moscow to recordings started
+  by the logging key, without a timezone suffix. Prompts edit only the title;
+  stopping finalizes the interval before asking for a rename. Keep explicit
+  script filenames literal and preserve existing files on naming collisions.
 - Ask for a filename when the logging key starts a recording and offer to rename
   it after stopping and flushing. Enter keeps the suggested name; Escape cancels
   startup or keeps the stopped log. Preserve literal input and existing files.

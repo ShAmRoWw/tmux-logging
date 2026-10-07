@@ -28,6 +28,7 @@ Usage:  cat raw_pty_bytes | python3 logging_filter.py [COLS ROWS] >> log
 
 import array
 import codecs
+import copy
 import ctypes
 import fcntl
 import functools
@@ -263,6 +264,19 @@ class Screen:
         def __eq__(self, other):
             return isinstance(other, type(self)) and vars(self) == vars(other)
 
+        def __deepcopy__(self, memo):
+            # Cells contain only immutable strings/None. Copy their container
+            # directly rather than visiting every character during a resize.
+            # Memoize both buffers so aliases in the saved screen stay aliases
+            # in the candidate, while writes remain isolated from the source.
+            row = type(self).__new__(type(self))
+            memo[id(self)] = row
+            for buffer in (self.cells, self.seen):
+                if id(buffer) not in memo:
+                    memo[id(buffer)] = buffer.copy()
+            row.__dict__ = copy.deepcopy(self.__dict__, memo)
+            return row
+
         def piece(self, start, end, wrapped):
             row = type(self)('', wrapped)
             row.cells = self.cells[start:end]
@@ -273,8 +287,10 @@ class Screen:
         def pending(self):
             if not self.cells:
                 return ('', not self.blank_seen)
+            if 0 not in self.seen:
+                return ('', False)
             return (''.join(ch for ch, seen in zip(self.cells, self.seen)
-                            if ch is not None and not seen), 0 in self.seen)
+                            if ch is not None and not seen), True)
 
     def __init__(self, cols, rows, out):
         self.COLS, self.ROWS = validate_dimensions(cols, rows)
@@ -422,36 +438,55 @@ class Screen:
         row.blank_seen = False
 
     def _put_cell(self, row, column, text, width):
-        cells = row.cells[:]
-        seen = row.seen[:]
+        cells, seen = row.cells, row.seen
+        old_width = len(cells)
         needed = column + width
-        cells.extend(' ' for _ in range(max(0, needed - len(cells))))
-        seen.extend(b'\0' * (len(cells) - len(seen)))
+        # Most output appends a cell. It cannot change existing provenance,
+        # and must not copy or scan the preceding contents of the row.
+        if column >= old_width:
+            cells.extend([' '] * (column - old_width))
+            cells.append(text)
+            if width > 1:
+                cells.extend([None] * (width - 1))
+            seen.extend(b'\0' * (needed - old_width))
+            row.blank_seen = False
+            return
+        # The other common case is an ordinary one-column overwrite, with
+        # no adjacent wide-cell continuation to repair.
+        if width == 1 and cells[column] is not None and (
+                needed >= old_width or cells[needed] is not None):
+            if cells[column] != text:
+                if seen[column]:
+                    row.seen = bytearray(old_width)
+                cells[column] = text
+            row.blank_seen = False
+            return
         # Overwriting either half clears the rest of that wide glyph. Do not
         # repair unrelated raw cells: tmux's ICH/DCH can leave detached halves.
         start, end = column, needed
         while start > 0 and cells[start] is None:
             start -= 1
-        while end < len(cells) and cells[end] is None:
+        while end < old_width and cells[end] is None:
             end += 1
-        cells[start:end] = [' '] * (end - start)
-        cells[column:needed] = [text] + [None] * (width - 1)
-        revised = any(flag and (i >= len(cells) or row.cells[i] != cells[i])
-                      for i, flag in enumerate(row.seen))
+        replacement = [' '] * (end - start)
+        replacement[column - start:needed - start] = [text] + [None] * (width - 1)
+        revised = any(seen[i] and cells[i] != replacement[i - start]
+                      for i in range(start, min(end, old_width)))
         if revised:
-            seen = bytearray(len(cells))
+            row.seen = bytearray(max(old_width, needed))
         else:
-            for i in range(column, needed):
-                if i >= row.width or row.cells[i] != cells[i]:
+            for i in range(column, min(needed, old_width)):
+                if cells[i] != replacement[i - start]:
                     seen[i] = 0
-        row.cells, row.seen = cells, seen
+            seen.extend(b'\0' * max(0, needed - old_width))
+        cells[start:end] = replacement
         row.blank_seen = False
 
     def write_char(self, ch):
         if ch == '\u3164':  # tmux ignores HANGUL FILLER.
             return
         row = self._lines[self._r]
-        if self._c > 0:
+        if self._c > 0 and ord(ch) >= 0x80:
             previous = self._c - 1
             while previous > 0 and previous < row.width and row.cells[previous] is None:
                 previous -= 1
